@@ -477,7 +477,10 @@ function summaryHtml(c) {
 /* ---------- 사람별 현황 표 ---------- */
 function peopleHtml(c) {
   const list = [];
-  for (const p of Object.values(c.people)) for (const tk of ["owe", "recv"]) if (hasTrack(p[tk])) list.push({ p, tk, x: p[tk] });
+  for (const p of Object.values(c.people)) {
+    if (state.sel.length && !state.sel.includes(p.name)) continue;   // 선택한 사람만 표시
+    for (const tk of ["owe", "recv"]) if (hasTrack(p[tk])) list.push({ p, tk, x: p[tk] });
+  }
   if (!list.length) return "";
   list.sort((a, b) => (b.x.principal - b.x.paid) - (a.x.principal - a.x.paid) || a.p.name.localeCompare(b.p.name, "ko"));
   const rows = list.map(({ p, tk, x }) => {
@@ -494,7 +497,7 @@ function peopleHtml(c) {
   }).join("");
   return `
   <div class="section-title"><span>사람별 현황</span><span class="hint">${state.sel.length
-      ? `<b>${state.sel.length}명 선택됨</b> · <a id="clearSel" style="color:var(--primary);cursor:pointer;text-decoration:underline">선택 해제</a>`
+      ? `<b>${state.sel.length}명 선택됨</b> · 사람을 더 고르려면 아래 거래 내역의 이름 버튼을 누르세요 · <a id="clearSel" style="color:var(--primary);cursor:pointer;text-decoration:underline">선택 해제</a>`
       : "행을 눌러 여러 명을 선택하면 아래 거래 내역이 선택한 사람 것만 보여요"}</span></div>
   <div class="card flush"><table class="t">
     <thead><tr><th>이름</th><th>구분</th><th class="r">총 금액(원)</th><th class="r">상환 금액(원)</th><th class="r">잔액(원)</th><th style="width:16%">상환율</th><th class="r">거래 수</th><th class="r">최근 거래</th></tr></thead>
