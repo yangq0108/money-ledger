@@ -271,7 +271,8 @@ const state = {
   pw: null, data: null, dirty: false, edit: false,
   handle: null,         // 연결된 컴퓨터의 장부 파일 (File System Access API)
   source: "site",       // 현재 env의 출처: site(배포된 파일) | file(연결된 파일)
-  filter: "all", kindFilter: "all", sortDesc: true, editingId: null,
+  sel: [],              // 선택한 사람들 (비어 있으면 전체)
+  kindFilter: "all", sortDesc: true, editingId: null,
   form: { date: today(), person: "", kind: "borrow", amount: "", memo: "" },
   error: ""
 };
@@ -481,7 +482,7 @@ function peopleHtml(c) {
   list.sort((a, b) => (b.x.principal - b.x.paid) - (a.x.principal - a.x.paid) || a.p.name.localeCompare(b.p.name, "ko"));
   const rows = list.map(({ p, tk, x }) => {
     const T = TRACKS[tk], left = x.principal - x.paid;
-    return `<tr class="click ${state.filter === p.name ? "sel" : ""}" data-person="${esc(p.name)}" data-row="1">
+    return `<tr class="click ${state.sel.includes(p.name) ? "sel" : ""}" data-person="${esc(p.name)}" data-row="1">
       <td class="first" data-label="">${esc(p.name)}</td>
       <td data-label="구분"><span class="pill ${tk === "owe" ? "borrow" : "lend"}">${T.name}</span></td>
       <td class="r num" data-label="총 금액(원)">${won(x.principal)}</td>
@@ -492,7 +493,9 @@ function peopleHtml(c) {
       <td class="r nw" data-label="최근 거래">${fmtDate(x.last)}</td></tr>`;
   }).join("");
   return `
-  <div class="section-title"><span>사람별 현황</span><span class="hint">행을 누르면 아래 거래 내역이 그 사람 것만 보여요</span></div>
+  <div class="section-title"><span>사람별 현황</span><span class="hint">${state.sel.length
+      ? `<b>${state.sel.length}명 선택됨</b> · <a id="clearSel" style="color:var(--primary);cursor:pointer;text-decoration:underline">선택 해제</a>`
+      : "행을 눌러 여러 명을 선택하면 아래 거래 내역이 선택한 사람 것만 보여요"}</span></div>
   <div class="card flush"><table class="t">
     <thead><tr><th>이름</th><th>구분</th><th class="r">총 금액(원)</th><th class="r">상환 금액(원)</th><th class="r">잔액(원)</th><th style="width:16%">상환율</th><th class="r">거래 수</th><th class="r">최근 거래</th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
@@ -502,7 +505,7 @@ function peopleHtml(c) {
 function ledgerHtml(c, names) {
   const d = state.data;
   const rows = d.tx.map((t, i) => ({ t, i }))
-    .filter(({ t }) => (state.filter === "all" || t.person === state.filter) && (state.kindFilter === "all" || t.kind === state.kindFilter))
+    .filter(({ t }) => (!state.sel.length || state.sel.includes(t.person)) && (state.kindFilter === "all" || t.kind === state.kindFilter))
     .sort((a, b) => (state.sortDesc ? -1 : 1) * (a.t.date.localeCompare(b.t.date) || a.i - b.i));
 
   const sums = {};
@@ -528,8 +531,8 @@ function ledgerHtml(c, names) {
     <span class="hint">잔액은 같은 사람·같은 구분(빌린 돈/빌려준 돈)끼리 날짜순으로 계산돼요</span></div>
   <div class="toolbar">
     <div class="chips">${names.length > 1 ? `
-      <button class="chip ${state.filter === "all" ? "sel" : ""}" data-person="all">전체</button>
-      ${names.map((n) => `<button class="chip ${state.filter === n ? "sel" : ""}" data-person="${esc(n)}">${esc(n)}</button>`).join("")}` : ""}
+      <button class="chip ${!state.sel.length ? "sel" : ""}" data-person="all">전체</button>
+      ${names.map((n) => `<button class="chip ${state.sel.includes(n) ? "sel" : ""}" data-person="${esc(n)}" aria-pressed="${state.sel.includes(n)}">${esc(n)}</button>`).join("")}` : ""}
     </div>
     <select class="select" id="kindFilter" aria-label="구분 필터">
       <option value="all">구분: 전체</option>
@@ -551,7 +554,7 @@ function ledgerHtml(c, names) {
 function mainHtml() {
   const d = state.data, c = compute(d.tx);
   const names = Object.keys(c.people).sort((a, b) => a.localeCompare(b, "ko"));
-  if (state.filter !== "all" && !c.people[state.filter]) state.filter = "all";
+  state.sel = state.sel.filter((n) => c.people[n]);
   return `
   <div class="top">
     <div>
@@ -662,8 +665,11 @@ function bind() {
 
   document.querySelectorAll("[data-person]").forEach((b) => b.addEventListener("click", () => {
     const p = b.dataset.person;
-    state.filter = (state.filter === p && b.dataset.row) ? "all" : p; render();
+    if (p === "all") state.sel = [];
+    else state.sel = state.sel.includes(p) ? state.sel.filter((n) => n !== p) : [...state.sel, p];
+    render();
   }));
+  on("#clearSel", "click", () => { state.sel = []; render(); });
   document.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => startEdit(b.dataset.edit)));
   document.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => delTx(b.dataset.del)));
 
@@ -713,7 +719,7 @@ function lock() {
   if (state.dirty && !confirm("저장하지 않은 변경사항이 사라져요. 잠글까요?")) return;
   stored(STORE_KEY, null);
   state.data = null; state.pw = null; state.dirty = false; state.edit = false; state.editingId = null;
-  state.filter = "all"; state.kindFilter = "all";
+  state.sel = []; state.kindFilter = "all";
   state.view = state.env ? "login" : "setup"; render();
 }
 
