@@ -269,6 +269,8 @@ const state = {
   view: "loading",      // loading | login | setup | main
   env: null,            // 암호화된 장부 (data/*.enc.json 또는 불러온 파일)
   pw: null, data: null, dirty: false, edit: false,
+  handle: null,         // 연결된 컴퓨터의 장부 파일 (File System Access API)
+  source: "site",       // 현재 env의 출처: site(배포된 파일) | file(연결된 파일)
   filter: "all", kindFilter: "all", sortDesc: true, editingId: null,
   form: { date: today(), person: "", kind: "borrow", amount: "", memo: "" },
   error: ""
@@ -294,6 +296,71 @@ function toast(msg) {
 function stored(k, v) {
   try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) {}
   return null;
+}
+
+/* =========================================================
+ * 컴퓨터의 장부 파일 연결 (File System Access API · Edge/Chrome)
+ *  - 파일을 한 번 연결하면 핸들을 IndexedDB에 기억해 두고,
+ *    열기·저장을 그 파일로 직접 한다 (내려받기 → 옮기기 불필요)
+ *  - 지인들 브라우저에는 연결이 없으므로 배포된 data/*.enc.json 을 그대로 쓴다
+ * ========================================================= */
+const FS_OK = !!window.showOpenFilePicker;
+const idb = {
+  open: () => new Promise((res, rej) => {
+    const r = indexedDB.open("ledger-handles", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("h");
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }),
+  async get(k) {
+    try { const db = await this.open(); return await new Promise((res) => {
+      const q = db.transaction("h").objectStore("h").get(k); q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); }); }
+    catch (e) { return null; }
+  },
+  async set(k, v) {
+    try { const db = await this.open(); await new Promise((res) => {
+      const tx = db.transaction("h", "readwrite");
+      if (v) tx.objectStore("h").put(v, k); else tx.objectStore("h").delete(k);
+      tx.oncomplete = res; tx.onerror = res; }); } catch (e) {}
+  }
+};
+async function readEnv(h) {
+  const env = JSON.parse(await (await h.getFile()).text());
+  if (!env.ct || !env.salt || !env.iv) throw new Error("bad file");
+  return env;
+}
+async function ensurePerm(h) {
+  const opt = { mode: "readwrite" };
+  if ((await h.queryPermission(opt)) === "granted") return true;
+  return (await h.requestPermission(opt)) === "granted";
+}
+async function linkFile() {
+  try {
+    const [h] = await window.showOpenFilePicker({ multiple: false, types: [{ description: "장부 파일", accept: { "application/json": [".json"] } }] });
+    if (!(await ensurePerm(h))) return toast("파일 접근을 허용해야 연결할 수 있어요");
+    if (state.data) {
+      if (!confirm(`‘${h.name}’에 저장하면 그 파일이 현재 장부 내용으로 덮어써져요. 연결할까요?`)) return;
+      state.handle = h; await idb.set(LEDGER, h); render(); toast("파일을 연결했어요"); return;
+    }
+    state.env = await readEnv(h); state.source = "file"; state.handle = h; await idb.set(LEDGER, h);
+    const saved = stored(STORE_KEY);
+    if (saved && (await tryUnlock(saved))) return;
+    state.view = "login"; state.error = ""; render();
+  } catch (e) {
+    if (e && e.name === "AbortError") return;
+    state.error = "올바른 장부 파일이 아니에요."; render();
+  }
+}
+async function openLinked() {
+  try {
+    if (!(await ensurePerm(state.handle))) return;
+    state.env = await readEnv(state.handle); state.source = "file";
+    const saved = stored(STORE_KEY);
+    if (saved && (await tryUnlock(saved))) return;
+    state.view = "login"; state.error = ""; render();
+  } catch (e) { state.error = "연결된 파일을 읽을 수 없어요. 다시 연결해 주세요."; render(); }
+}
+async function unlinkFile() {
+  state.handle = null; await idb.set(LEDGER, null); render(); toast("연결을 해제했어요");
 }
 
 /* =========================================================
@@ -352,9 +419,17 @@ function loginHtml() {
       <div class="err" id="err">${esc(state.error)}</div>
       <button class="btn primary" id="loginBtn" type="submit">열기</button>
     </form>
-    <div class="alt">장부 파일을 직접 열려면 <a id="pickFile">파일 선택</a></div>
-    <input type="file" id="fileIn" accept=".json,application/json" hidden>
+    ${fileAltHtml()}
   </div>`;
+}
+
+/* 장부 파일 연결 영역 (로그인·새 장부 화면 공용) */
+function fileAltHtml() {
+  if (!FS_OK) return `<div class="alt">장부 파일을 직접 열려면 <a id="pickFile">파일 선택</a></div>
+    <input type="file" id="fileIn" accept=".json,application/json" hidden>`;
+  return `${state.handle ? `<button class="btn" id="openLinked" type="button" style="margin-top:16px;width:100%">📂 연결된 파일로 열기 · ${esc(state.handle.name)}</button>` : ""}
+    <div class="alt">${state.handle ? "다른 파일로 바꾸려면" : "내 컴퓨터의 장부 파일을 연결하면 편집 내용이 그 파일에 바로 저장돼요."} <a id="pickFile">파일 연결</a></div>
+    ${state.source === "file" && state.view === "login" ? '<div class="muted small" style="margin-top:6px">연결된 파일에서 불러왔어요</div>' : ""}`;
 }
 
 function setupHtml() {
@@ -375,8 +450,7 @@ function setupHtml() {
       <div class="err" id="err">${esc(state.error)}</div>
       <button class="btn primary" type="submit">장부 만들기</button>
     </form>
-    <div class="alt">이미 만든 장부 파일이 있다면 <a id="pickFile">파일 선택</a></div>
-    <input type="file" id="fileIn" accept=".json,application/json" hidden>
+    ${fileAltHtml()}
   </div>`;
 }
 
@@ -541,6 +615,9 @@ function manageHtml() {
       <button class="btn primary" id="saveBtn2">저장 파일 내려받기</button>
       <button class="btn" id="csvBtn">CSV로 내보내기</button>
       <button class="btn" id="ownerBtn">주인 이름 변경</button>
+      ${FS_OK ? (state.handle
+        ? `<button class="btn on" id="unlinkBtn" title="연결 해제">📂 연결됨 · ${esc(state.handle.name)} ✕</button>`
+        : '<button class="btn" id="linkBtn">📂 장부 파일 연결</button>') : ""}
     </div>
     <details class="pw" style="margin-top:14px">
       <summary>비밀번호 변경</summary>
@@ -550,8 +627,9 @@ function manageHtml() {
         <button class="btn" type="submit">변경</button>
       </form>
     </details>
-    <div class="notice" style="margin-top:14px">
-      <b>저장 방법</b> — ① “저장 파일 내려받기”로 <b>${esc(LEDGER)}.enc.json</b>을 받고 ② 저장소의 <b>data</b> 폴더에 덮어쓴 뒤 ③ GitHub에 올리면(push) 1~2분 안에 지인들 화면에도 반영돼요.
+    <div class="notice" style="margin-top:14px">${state.handle
+      ? `<b>저장 방법</b> — “저장”을 누르면 연결된 파일 <b>${esc(state.handle.name)}</b>에 바로 기록돼요. 지인들 화면에 반영하려면 그 파일을 저장소의 <b>data</b> 폴더에 복사한 뒤 GitHub에 올리세요(push).`
+      : `<b>저장 방법</b> — ① “저장 파일 내려받기”로 <b>${esc(LEDGER)}.enc.json</b>을 받고 ② 저장소의 <b>data</b> 폴더에 덮어쓴 뒤 ③ GitHub에 올리면(push) 1~2분 안에 지인들 화면에도 반영돼요.`}
     </div>
   </div>`;
 }
@@ -564,8 +642,11 @@ function bind() {
 
   on("#loginForm", "submit", onLogin);
   on("#setupForm", "submit", onSetup);
-  on("#pickFile", "click", () => $("#fileIn").click());
+  on("#pickFile", "click", () => (FS_OK ? linkFile() : $("#fileIn").click()));
   on("#fileIn", "change", onPickFile);
+  on("#openLinked", "click", openLinked);
+  on("#linkBtn", "click", linkFile);
+  on("#unlinkBtn", "click", unlinkFile);
 
   on("#toggleEdit", "click", () => { state.edit = !state.edit; state.editingId = null; state.error = ""; render(); });
   on("#lockBtn", "click", lock);
@@ -692,7 +773,18 @@ async function save() {
   state.data.updated = today();
   const env = await encrypt(state.data, state.pw);
   state.env = env;
-  download(LEDGER + ".enc.json", JSON.stringify(env), "application/json");
+  const text = JSON.stringify(env);
+  if (state.handle) {
+    try {
+      if (!(await ensurePerm(state.handle))) throw new Error("permission");
+      const w = await state.handle.createWritable();
+      await w.write(text); await w.close();
+      state.dirty = false; render();
+      toast("연결된 파일(" + state.handle.name + ")에 저장했어요");
+      return;
+    } catch (e) { toast("연결된 파일에 저장하지 못해 내려받기로 대신해요"); }
+  }
+  download(LEDGER + ".enc.json", text, "application/json");
   state.dirty = false; render();
   toast("내려받은 파일을 data 폴더에 덮어쓰고 GitHub에 올려주세요");
 }
@@ -715,10 +807,17 @@ window.addEventListener("beforeunload", (e) => { if (state.dirty) { e.preventDef
     return;
   }
   render();
-  try {
+  if (FS_OK) state.handle = await idb.get(LEDGER);
+  // 이미 접근 권한이 살아 있는 연결 파일이 있으면 그 파일을 우선 사용
+  if (state.handle) {
+    try {
+      if ((await state.handle.queryPermission({ mode: "readwrite" })) === "granted") { state.env = await readEnv(state.handle); state.source = "file"; }
+    } catch (e) { state.env = null; }
+  }
+  if (!state.env) try {
     const res = await fetch(DATA_PATH + "?t=" + Date.now(), { cache: "no-store" });
     if (!res.ok) throw new Error(res.status);
-    state.env = await res.json();
+    state.env = await res.json(); state.source = "site";
   } catch (e) { state.env = null; }
   if (!state.env) { state.view = "setup"; render(); return; }
   const saved = stored(STORE_KEY);
